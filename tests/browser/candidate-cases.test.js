@@ -185,7 +185,7 @@ test("rapid add clicks add one case and keep its status", async (t) => {
     // whatever the candidate has typed. So the case that lands is the last
     // value written, not the first.
     assert.equal(
-      await page.locator("#candidate-case-list").locator("li").textContent(),
+      await page.locator("#candidate-case-list").locator("li").evaluate((item) => item.firstChild.textContent.trim()),
       "Your case 1: [[5,7,11,15],12]",
     );
   } finally {
@@ -320,6 +320,45 @@ test("a sixth candidate case is refused without blocking the run", async (t) => 
     await page.waitForFunction(() => document.querySelector("#results-body").textContent.includes("Your case 5"));
     assert.match(await page.locator("#candidate-case-status").textContent(), /up to 5 cases/);
     assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 5);
+  } finally {
+    await page.close();
+  }
+});
+
+
+test("removing a saved candidate case frees its slot and persists", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${base}/interview.html?problem=chargeback-pair-match`, { waitUntil: "domcontentloaded" });
+    await candidateCasesReady(page);
+    for (let index = 0; index < 5; index++) {
+      await page.evaluate((index) => {
+        document.querySelector("#candidate-case-input").value = JSON.stringify([[index, 7], index + 7]);
+        document.querySelector("#candidate-case-add").click();
+      }, index);
+      await page.waitForFunction((count) => document.querySelector("#candidate-case-list").children.length === count, index + 1);
+    }
+    await page.evaluate(() => { document.querySelector("#candidate-case").open = true; });
+    assert.equal(await page.locator("[data-remove-case]").count(), 5);
+    await page.evaluate(() => document.querySelector('[data-remove-case="2"]').click());
+    assert.equal(await page.locator("#candidate-case-status").textContent(), "4/5 cases ready.");
+    assert.equal(await page.evaluate(() => document.activeElement.getAttribute("aria-label")), "Remove case 3");
+    await page.evaluate(() => {
+      document.querySelector("#candidate-case-input").value = "[[10,7],17]";
+      document.querySelector("#candidate-case-add").click();
+    });
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length === 5);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length === 5);
+    assert.doesNotMatch(await page.locator("#candidate-case-list").textContent(), /\[\[2,7\],9\]/);
+    assert.match(await page.locator("#candidate-case-list").textContent(), /\[\[10,7\],17\]/);
+    await page.evaluate(() => {
+      document.querySelector("#candidate-case").open = true;
+      while (document.querySelector("[data-remove-case]")) document.querySelector("[data-remove-case]").click();
+    });
+    assert.equal(await page.locator("#candidate-case-status").textContent(), "0/5 cases ready.");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "candidate-case-add");
   } finally {
     await page.close();
   }

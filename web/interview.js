@@ -1601,9 +1601,19 @@ async function addCandidateCaseNow() {
 
 function renderCandidateCases() {
   nodes.candidateCaseList.innerHTML = state.candidateCases
-    .map((testCase, index) => `<li>Your case ${index + 1}: ${escapeHtml(JSON.stringify(testCase.input))}</li>`)
+    .map((testCase, index) => `<li>Your case ${index + 1}: ${escapeHtml(JSON.stringify(testCase.input))} <button type="button" data-remove-case="${index}" aria-label="Remove case ${index + 1}">Remove</button></li>`)
     .join("");
-  if (state.candidateCases.length) nodes.candidateCaseStatus.textContent = `${state.candidateCases.length}/${CANDIDATE_CASE_LIMIT} cases ready.`;
+  nodes.candidateCaseStatus.textContent = `${state.candidateCases.length}/${CANDIDATE_CASE_LIMIT} cases ready.`;
+  for (const button of nodes.candidateCaseList.querySelectorAll("[data-remove-case]")) {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.removeCase);
+      state.candidateCases = state.candidateCases.filter((_, current) => current !== index);
+      writeStored(candidateCaseStorageKey, JSON.stringify(state.candidateCases), tabStorage);
+      renderCandidateCases();
+      const remaining = nodes.candidateCaseList.querySelectorAll("[data-remove-case]");
+      (remaining[Math.min(index, remaining.length - 1)] || nodes.candidateCaseAdd).focus();
+    });
+  }
 }
 
 function updateRunAvailability() {
