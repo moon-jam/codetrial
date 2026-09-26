@@ -185,7 +185,7 @@ test("rapid add clicks add one case and keep its status", async (t) => {
     // whatever the candidate has typed. So the case that lands is the last
     // value written, not the first.
     assert.equal(
-      await page.locator("#candidate-case-list").locator("li").evaluate((item) => item.firstChild.textContent.trim()),
+      await page.locator("#candidate-case-list").locator("li").evaluate((item) => item.querySelector("span").textContent.trim()),
       "Your case 1: [[5,7,11,15],12]",
     );
   } finally {
@@ -344,19 +344,36 @@ test("removing a saved candidate case frees its slot and persists", async (t) =>
     await page.evaluate(() => document.querySelector('[data-remove-case="2"]').click());
     assert.equal(await page.locator("#candidate-case-status").textContent(), "4/5 cases ready.");
     assert.equal(await page.evaluate(() => document.activeElement.getAttribute("aria-label")), "Remove case 3");
+    // Reload before the replacement is added: the add writes the in-memory
+    // list to storage, so it would cover for a removal whose own write never
+    // happened. `candidateCasesReady` cannot pace this one - the placeholder
+    // is written only when storage came back empty - so the first rendered
+    // row is the ready signal and the count is asserted, not awaited.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length > 0);
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 4);
+    assert.doesNotMatch(await page.locator("#candidate-case-list").textContent(), /\[\[2,7\],9\]/);
     await page.evaluate(() => {
       document.querySelector("#candidate-case-input").value = "[[10,7],17]";
       document.querySelector("#candidate-case-add").click();
     });
     await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length === 5);
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length === 5);
-    assert.doesNotMatch(await page.locator("#candidate-case-list").textContent(), /\[\[2,7\],9\]/);
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length > 0);
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 5);
     assert.match(await page.locator("#candidate-case-list").textContent(), /\[\[10,7\],17\]/);
-    await page.evaluate(() => {
-      document.querySelector("#candidate-case").open = true;
-      while (document.querySelector("[data-remove-case]")) document.querySelector("[data-remove-case]").click();
-    });
+    // Removal ignores a second click that lands before the next animation
+    // frame, so the tight in-page loop this used to be would take one case
+    // and then spin. Five clicks from here instead, one frame apart - the
+    // row is gone before the click returns, so only a frame can pace the
+    // guard - and the empty list is asserted after them, so a removal that
+    // stops removing fails by name here instead of spinning or timing out.
+    await page.evaluate(() => { document.querySelector("#candidate-case").open = true; });
+    for (let clicks = 0; clicks < 5; clicks++) {
+      await page.evaluate(() => document.querySelector("[data-remove-case]").click());
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    }
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 0);
     assert.equal(await page.locator("#candidate-case-status").textContent(), "0/5 cases ready.");
     assert.equal(await page.evaluate(() => document.activeElement.id), "candidate-case-add");
   } finally {
