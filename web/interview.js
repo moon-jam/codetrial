@@ -471,6 +471,21 @@ function bindEvents() {
   nodes.leaveRoom.addEventListener("click", leaveRoom);
   nodes.run.addEventListener("click", runTests);
   nodes.candidateCaseAdd.addEventListener("click", () => void addCandidateCase());
+  // One delegated listener for the whole list, registered once here rather
+  // than in renderCandidateCases: the list element survives every render, so
+  // registering there would stack a handler per render and one click would
+  // remove several cases. A removal re-renders synchronously, which puts the
+  // next case's Remove button under the pointer already armed, so a removal
+  // click arriving before the next animation frame is ignored -- an
+  // accidental double-click must not delete two cases with no undo.
+  let removeCaseArmed = true;
+  nodes.candidateCaseList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove-case]");
+    if (!button || !removeCaseArmed) return;
+    removeCaseArmed = false;
+    requestAnimationFrame(() => { removeCaseArmed = true; });
+    removeCandidateCase(Number(button.dataset.removeCase));
+  });
   void initializeCandidateCases();
   nodes.meetOutputSelect.addEventListener("change", () => {
     void applyAudioOutput(nodes.meetOutputSelect.value);
@@ -1645,9 +1660,48 @@ async function addCandidateCaseNow() {
 
 function renderCandidateCases() {
   nodes.candidateCaseList.innerHTML = state.candidateCases
-    .map((testCase, index) => `<li>Your case ${index + 1}: ${escapeHtml(JSON.stringify(testCase.input))}</li>`)
+    .map((testCase, index) => `<li><span>Your case ${index + 1}: ${escapeHtml(JSON.stringify(testCase.input))}</span> <button type="button" data-remove-case="${index}" aria-label="Remove case ${index + 1}">Remove</button></li>`)
     .join("");
-  if (state.candidateCases.length) nodes.candidateCaseStatus.textContent = `${state.candidateCases.length}/${CANDIDATE_CASE_LIMIT} cases ready.`;
+  // An empty list announces nothing, so a page that never had a case keeps
+  // the live region blank; removeCandidateCase writes the count itself, which
+  // is what lets a removal down to zero still announce "0/5 cases ready."
+  if (state.candidateCases.length) {
+    nodes.candidateCaseStatus.textContent = `${state.candidateCases.length}/${CANDIDATE_CASE_LIMIT} cases ready.`;
+  }
+}
+
+/// Remove a saved case by position. The results panel is reset rather than
+/// kept: runBrowserTests labels candidate rows by the position they held at
+/// run time, and a removal renumbers every later case, so a kept panel would
+/// show a "Your case N" that now names a different case -- the same mismatch
+/// the interviewer already holds from the run's topics.tests payload, which
+/// nothing here republishes or recalls.
+function removeCandidateCase(index) {
+  // A run in flight is iterating the array it captured at start, and its
+  // completion repaints the results panel and publishes it, so a removal taken
+  // now is undone a moment later with results that still name the removed
+  // case. The run ends on its own in seconds, so the click is refused with the
+  // reason rather than queued. The guard lives here rather than in the click
+  // listener so a caller that is not the button gets it too.
+  if (state.runningTests) {
+    nodes.candidateCaseStatus.textContent = "Wait for the test run to finish before removing a case.";
+    return;
+  }
+  state.candidateCases = state.candidateCases.filter((_, current) => current !== index);
+  writeStored(candidateCaseStorageKey, JSON.stringify(state.candidateCases), tabStorage);
+  renderCandidateCases();
+  // renderCandidateCases leaves the status alone on an empty list, so the
+  // removal path writes the count itself and a removal down to zero is still
+  // announced.
+  nodes.candidateCaseStatus.textContent = `${state.candidateCases.length}/${CANDIDATE_CASE_LIMIT} cases ready.`;
+  state.latestSummary = null;
+  state.testStatus = "done"; // the value the page loads with, so no run state outlives the panel it painted
+  nodes.resultsLabel.textContent = "Test results";
+  // The placeholder web/interview.html ships in #results-body; keep the
+  // sentence identical.
+  nodes.resultsBody.innerHTML = `<p class="muted small">Run the test cases any time - Jim sees your results too.</p>`;
+  const remaining = nodes.candidateCaseList.querySelectorAll("[data-remove-case]");
+  (remaining[Math.min(index, remaining.length - 1)] || nodes.candidateCaseAdd).focus();
 }
 
 function updateRunAvailability() {

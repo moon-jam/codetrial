@@ -147,7 +147,7 @@ test("rapid add clicks add one case and keep its status", async (t) => {
     // whatever the candidate has typed. So the case that lands is the last
     // value written, not the first.
     assert.equal(
-      await page.locator("#candidate-case-list").locator("li").textContent(),
+      await page.locator("#candidate-case-list").locator("li").evaluate((item) => item.querySelector("span").textContent.trim()),
       "Your case 1: [[5,7,11,15],12]",
     );
   } finally {
@@ -282,6 +282,122 @@ test("a sixth candidate case is refused without blocking the run", async (t) => 
     await page.waitForFunction(() => document.querySelector("#results-body").textContent.includes("Your case 5"));
     assert.match(await page.locator("#candidate-case-status").textContent(), /up to 5 cases/);
     assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 5);
+  } finally {
+    await page.close();
+  }
+});
+
+
+test("removing a saved candidate case frees its slot and persists", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${base}/interview.html?problem=chargeback-pair-match`, { waitUntil: "domcontentloaded" });
+    await candidateCasesReady(page);
+    for (let index = 0; index < 5; index++) {
+      await page.evaluate((index) => {
+        document.querySelector("#candidate-case-input").value = JSON.stringify([[index, 7], index + 7]);
+        document.querySelector("#candidate-case-add").click();
+      }, index);
+      await page.waitForFunction((count) => document.querySelector("#candidate-case-list").children.length === count, index + 1);
+    }
+    await page.evaluate(() => { document.querySelector("#candidate-case").open = true; });
+    assert.equal(await page.locator("[data-remove-case]").count(), 5);
+    await page.evaluate(() => document.querySelector('[data-remove-case="2"]').click());
+    assert.equal(await page.locator("#candidate-case-status").textContent(), "4/5 cases ready.");
+    assert.equal(await page.evaluate(() => document.activeElement.getAttribute("aria-label")), "Remove case 3");
+    // Reload before the replacement is added: the add writes the in-memory
+    // list to storage, so it would cover for a removal whose own write never
+    // happened. `candidateCasesReady` cannot pace this one - the placeholder
+    // is written only when storage came back empty - so the first rendered
+    // row is the ready signal and the count is asserted, not awaited.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length > 0);
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 4);
+    assert.doesNotMatch(await page.locator("#candidate-case-list").textContent(), /\[\[2,7\],9\]/);
+    await page.evaluate(() => {
+      document.querySelector("#candidate-case-input").value = "[[10,7],17]";
+      document.querySelector("#candidate-case-add").click();
+    });
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length === 5);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length > 0);
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 5);
+    assert.match(await page.locator("#candidate-case-list").textContent(), /\[\[10,7\],17\]/);
+    // Removal ignores a second click that lands before the next animation
+    // frame, so the tight in-page loop this used to be would take one case
+    // and then spin. Five clicks from here instead, one frame apart - the
+    // row is gone before the click returns, so only a frame can pace the
+    // guard - and the empty list is asserted after them, so a removal that
+    // stops removing fails by name here instead of spinning or timing out.
+    await page.evaluate(() => { document.querySelector("#candidate-case").open = true; });
+    for (let clicks = 0; clicks < 5; clicks++) {
+      await page.evaluate(() => document.querySelector("[data-remove-case]").click());
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    }
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 0);
+    assert.equal(await page.locator("#candidate-case-status").textContent(), "0/5 cases ready.");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "candidate-case-add");
+  } finally {
+    await page.close();
+  }
+});
+
+// Seeding goes through addInitScript because initializeCandidateCases reads
+// sessionStorage once, during module evaluation: a value written after goto is
+// a value the page never saw. The judge is then held so the run below parks
+// inside addCandidateCase with runningTests already set -- the window a removal
+// would race, since the parked run still holds the pre-removal array and its
+// completion repaints and publishes it. No sleeps: the hold is the window.
+test("a case cannot be removed while tests are running", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  try {
+    await page.addInitScript(() => {
+      sessionStorage.setItem(
+        "codetrial.candidateCases.chargeback-pair-match",
+        JSON.stringify([{ input: [[0, 7], 7] }, { input: [[1, 7], 8] }]),
+      );
+    });
+    let releaseJudge;
+    const judgeHeld = new Promise((resolve) => { releaseJudge = resolve; });
+    await page.route("**/judges/chargeback-pair-match.json", async (route) => {
+      await judgeHeld;
+      await route.continue();
+    });
+    await page.goto(`${base}/interview.html?problem=chargeback-pair-match`, { waitUntil: "domcontentloaded" });
+    // candidateCasesReady waits on the judge this test is holding, so the
+    // rendered rows are the ready signal instead: bindEvents registers the
+    // delegated remove listener before it calls initializeCandidateCases, so
+    // the seeded rows being on screen means the listener already is too.
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length === 2);
+    await page.evaluate(() => {
+      document.querySelector("#candidate-case").open = true;
+      document.querySelector("#candidate-case-input").value = "[[2,7],9]";
+      document.querySelector('[data-language="javascript"]').click();
+      document.querySelector("#run-tests").click();
+    });
+    // A removal re-renders the list, so the rows still being there alongside
+    // the refusal proves the guard answered the click, not that the click
+    // missed its listener.
+    await page.evaluate(() => document.querySelector("[data-remove-case]").click());
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 2);
+    assert.equal(
+      await page.locator("#candidate-case-status").textContent(),
+      "Wait for the test run to finish before removing a case.",
+    );
+    // loadJudge caches per id, so this one release answers the module's judge
+    // promise, the parked add and the run. The typed case lands on the answer,
+    // per the same contract the add button has, and the list ends at three.
+    releaseJudge();
+    await page.waitForFunction(() => document.querySelector("#results-body").textContent.includes("Your case 1"));
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 3);
+    // The guard covers the run window only: with the run done, the same click
+    // removes. Each awaited step above cost frames, so the double-click guard
+    // has long re-armed.
+    await page.evaluate(() => document.querySelector("[data-remove-case]").click());
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 2);
+    assert.equal(await page.locator("#candidate-case-status").textContent(), "2/5 cases ready.");
   } finally {
     await page.close();
   }
