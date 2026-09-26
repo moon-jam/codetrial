@@ -380,3 +380,63 @@ test("removing a saved candidate case frees its slot and persists", async (t) =>
     await page.close();
   }
 });
+
+// Seeding goes through addInitScript because initializeCandidateCases reads
+// sessionStorage once, during module evaluation: a value written after goto is
+// a value the page never saw. The judge is then held so the run below parks
+// inside addCandidateCase with runningTests already set -- the window a removal
+// would race, since the parked run still holds the pre-removal array and its
+// completion repaints and publishes it. No sleeps: the hold is the window.
+test("a case cannot be removed while tests are running", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  try {
+    await page.addInitScript(() => {
+      sessionStorage.setItem(
+        "codetrial.candidateCases.chargeback-pair-match",
+        JSON.stringify([{ input: [[0, 7], 7] }, { input: [[1, 7], 8] }]),
+      );
+    });
+    let releaseJudge;
+    const judgeHeld = new Promise((resolve) => { releaseJudge = resolve; });
+    await page.route("**/judges/chargeback-pair-match.json", async (route) => {
+      await judgeHeld;
+      await route.continue();
+    });
+    await page.goto(`${base}/interview.html?problem=chargeback-pair-match`, { waitUntil: "domcontentloaded" });
+    // candidateCasesReady waits on the judge this test is holding, so the
+    // rendered rows are the ready signal instead: bindEvents registers the
+    // delegated remove listener before it calls initializeCandidateCases, so
+    // the seeded rows being on screen means the listener already is too.
+    await page.waitForFunction(() => document.querySelector("#candidate-case-list").children.length === 2);
+    await page.evaluate(() => {
+      document.querySelector("#candidate-case").open = true;
+      document.querySelector("#candidate-case-input").value = "[[2,7],9]";
+      document.querySelector('[data-language="javascript"]').click();
+      document.querySelector("#run-tests").click();
+    });
+    // A removal re-renders the list, so the rows still being there alongside
+    // the refusal proves the guard answered the click, not that the click
+    // missed its listener.
+    await page.evaluate(() => document.querySelector("[data-remove-case]").click());
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 2);
+    assert.equal(
+      await page.locator("#candidate-case-status").textContent(),
+      "Wait for the test run to finish before removing a case.",
+    );
+    // loadJudge caches per id, so this one release answers the module's judge
+    // promise, the parked add and the run. The typed case lands on the answer,
+    // per the same contract the add button has, and the list ends at three.
+    releaseJudge();
+    await page.waitForFunction(() => document.querySelector("#results-body").textContent.includes("Your case 1"));
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 3);
+    // The guard covers the run window only: with the run done, the same click
+    // removes. Each awaited step above cost frames, so the double-click guard
+    // has long re-armed.
+    await page.evaluate(() => document.querySelector("[data-remove-case]").click());
+    assert.equal(await page.locator("#candidate-case-list").locator("li").count(), 2);
+    assert.equal(await page.locator("#candidate-case-status").textContent(), "2/5 cases ready.");
+  } finally {
+    await page.close();
+  }
+});

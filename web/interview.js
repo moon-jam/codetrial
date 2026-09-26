@@ -1633,6 +1633,16 @@ function renderCandidateCases() {
 /// the interviewer already holds from the run's topics.tests payload, which
 /// nothing here republishes or recalls.
 function removeCandidateCase(index) {
+  // A run in flight is iterating the array it captured at start, and its
+  // completion repaints the results panel and publishes it, so a removal taken
+  // now is undone a moment later with results that still name the removed
+  // case. The run ends on its own in seconds, so the click is refused with the
+  // reason rather than queued. The guard lives here rather than in the click
+  // listener so a caller that is not the button gets it too.
+  if (state.runningTests) {
+    nodes.candidateCaseStatus.textContent = "Wait for the test run to finish before removing a case.";
+    return;
+  }
   state.candidateCases = state.candidateCases.filter((_, current) => current !== index);
   writeStored(candidateCaseStorageKey, JSON.stringify(state.candidateCases), tabStorage);
   renderCandidateCases();
